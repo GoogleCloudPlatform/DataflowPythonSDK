@@ -410,7 +410,7 @@ class PTransform(WithTypeHints):
     from google.cloud.dataflow import pipeline
     # pylint: enable=g-import-not-at-top
     if isinstance(pvalueish, pipeline.Pipeline):
-      pvalueish = pvalue.PBegin(pipeline=pvalueish, transform=None)
+      pvalueish = pvalue.PBegin(pvalueish)
 
     return pvalueish, (pvalueish,)
 
@@ -467,7 +467,7 @@ class PTransformWithSideInputs(PTransform):
           'AsIter(pcollection) or AsSingleton(pcollection) to indicate how the '
           'PCollection is to be used.')
     self.args, self.kwargs, self.side_inputs = util.remove_objects_from_args(
-        args, kwargs, (pvalue.AsSingleton, pvalue.AsIter))
+        args, kwargs, pvalue.PCollectionView)
     self.raw_side_inputs = args, kwargs
 
     # Prevent name collisions with fns of the form '<function <lambda> at ...>'
@@ -522,7 +522,7 @@ class PTransformWithSideInputs(PTransform):
     if type_hints:
       args, kwargs = self.raw_side_inputs
       def element_type(side_input):
-        if isinstance(side_input, pvalue.AsSideInput):
+        if isinstance(side_input, pvalue.PCollectionView):
           return side_input.element_type
         else:
           return instance_to_type(side_input)

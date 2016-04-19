@@ -17,8 +17,12 @@
 import unittest
 
 from google.cloud.dataflow.pipeline import Pipeline
+from google.cloud.dataflow.pvalue import AsDict
+from google.cloud.dataflow.pvalue import AsIter
+from google.cloud.dataflow.pvalue import AsList
+from google.cloud.dataflow.pvalue import AsSingleton
 from google.cloud.dataflow.pvalue import PValue
-from google.cloud.dataflow.transforms import PTransform
+from google.cloud.dataflow.transforms import Create
 
 
 class FakePipeline(Pipeline):
@@ -33,14 +37,21 @@ class PValueTest(unittest.TestCase):
 
   def test_pvalue_expected_arguments(self):
     pipeline = Pipeline('DirectPipelineRunner')
-    transform = PTransform()
-    value = PValue(pipeline=pipeline, transform=transform)
+    value = PValue(pipeline)
     self.assertEqual(pipeline, value.pipeline)
 
-  def test_pvalue_missing_arguments(self):
-    self.assertRaises(ValueError, PValue,
-                      pipeline=Pipeline('DirectPipelineRunner'))
-    self.assertRaises(ValueError, PValue, transform=PTransform())
+  def test_pcollectionview_not_recreated(self):
+    pipeline = Pipeline('DirectPipelineRunner')
+    value = pipeline | Create('create1', [1, 2, 3])
+    value2 = pipeline | Create('create2', [(1, 1), (2, 2), (3, 3)])
+    self.assertEqual(AsSingleton(value), AsSingleton(value))
+    self.assertEqual(AsSingleton('new', value, default_value=1),
+                     AsSingleton('new', value, default_value=1))
+    self.assertNotEqual(AsSingleton(value),
+                        AsSingleton('new', value, default_value=1))
+    self.assertEqual(AsIter(value), AsIter(value))
+    self.assertEqual(AsList(value), AsList(value))
+    self.assertEqual(AsDict(value2), AsDict(value2))
 
 
 if __name__ == '__main__':

@@ -30,19 +30,16 @@ except ImportError:
 # Configure the required packages and scripts to install.
 REQUIRED_PACKAGES = [
     'dill>=0.2.5',
-    # Pin the version of APItools since 0.4.12 is broken and 0.4.11 is the
-    # last known good.
-    # TODO(silviuc): Redesign requirements to have pinned versions.
-    'google-apitools==0.4.11',
-    'google-apitools-bigquery-v2',
-    'google-apitools-dataflow-v1b3>=0.4.20160217',
-    'google-apitools-storage-v1',
+    'google-apitools>=0.5.2',
+    # TODO(silviuc): Reenable api client package dependencies when we can
+    # update the packages to the latest version without affecting previous
+    # SDK releases.
+    # 'google-apitools-bigquery-v2',
+    # 'google-apitools-dataflow-v1b3>=0.4.20160217',
+    # 'google-apitools-storage-v1',
     'httplib2>=0.8',
     'mock>=1.0.1',
-    # Pin the version of oauth2client since 2.0.0 does not have
-    # oauth2client.client.SignedJwtAssertionCredentials and 1.5.2 is the last
-    # known good version.
-    'oauth2client==1.5.2',
+    'oauth2client>=2.0.1',
     'protorpc>=0.9.1',
     'python-gflags>=2.0',
     'pyyaml>=3.10',
@@ -102,6 +99,7 @@ setuptools.setup(
     download_url=get_download_url(),
     author='Google, Inc.',
     packages=setuptools.find_packages(),
+    namespace_packages=['google', 'google.cloud'],
     entry_points={
         'console_scripts': CONSOLE_SCRIPTS,
         },
@@ -115,6 +113,7 @@ setuptools.setup(
     setup_requires=['nose>=1.0'],
     install_requires=REQUIRED_PACKAGES,
     test_suite='nose.collector',
+    zip_safe=False,
     # PyPI package information.
     classifiers=[
         'Intended Audience :: End Users/Desktop',

@@ -22,7 +22,10 @@ import logging
 import random
 
 
+from google.cloud.dataflow import pvalue
 from google.cloud.dataflow.coders import BytesCoder
+from google.cloud.dataflow.coders import TupleCoder
+from google.cloud.dataflow.coders import WindowedValueCoder
 from google.cloud.dataflow.internal import pickler
 from google.cloud.dataflow.pvalue import EmptySideInput
 from google.cloud.dataflow.runners import common
@@ -51,9 +54,10 @@ class ReceiverSet(object):
   ReceiverSets are attached to the outputting Operation.
   """
 
-  def __init__(self, coder, output_index=0):
+  def __init__(self, counter_factory, coder, output_index=0):
     self.receivers = []
     self.opcounter = None
+    self.counter_factory = counter_factory
     self.output_index = output_index
     self.coder = coder
 
@@ -62,25 +66,32 @@ class ReceiverSet(object):
 
   def start(self, step_name):
     self.opcounter = opcounters.OperationCounters(
-        step_name, self.coder, self.output_index)
+        self.counter_factory, step_name, self.coder, self.output_index)
 
-  def output(self, windowed_value):
-    self.update_counters(windowed_value)
+  def output(self, windowed_value, coder=None):
+    self.update_counters_start(windowed_value, coder)
     for receiver in self.receivers:
       receiver.process(windowed_value)
+    self.update_counters_finish()
 
-  def update_counters(self, windowed_value):
+  def update_counters_start(self, windowed_value, coder=None):
     if self.opcounter:
-      self.opcounter.update(windowed_value)
+      self.opcounter.update_from(windowed_value, coder)
 
-  def itercounters(self):
+  def update_counters_finish(self):
     if self.opcounter:
-      for counter in self.opcounter:
-        yield counter
+      self.opcounter.update_collect()
 
   def __str__(self):
     return '[%s]' % ' '.join([r.str_internal(is_recursive=True)
                               for r in self.receivers])
+
+  def __repr__(self):
+    return '<%s %d %s [%s]>' % (
+        self.__class__.__name__,
+        self.output_index,
+        self.coder,
+        ' '.join([r.str_internal(is_recursive=True) for r in self.receivers]))
 
 
 class Operation(object):
@@ -88,23 +99,23 @@ class Operation(object):
 
   An operation can have one or more outputs and for each output it can have
   one or more receiver operations that will take that as input.
-  TODO(gildea): Refactor "receivers[OUTPUT][RECEIVER]" as
-  "outputs[INDEX][RECEIVER]"
   """
 
-  def __init__(self, spec):
+  def __init__(self, spec, counter_factory):
     """Initializes a worker operation instance.
 
     Args:
       spec: A maptask.Worker* instance.
+      counter_factory: the counter_factory to use for our counters.
     """
+    self.counter_factory = counter_factory
     self.spec = spec
     self.receivers = []
     # Everything except WorkerSideInputSource, which is not a
     # top-level operation, should have output_coders
     if getattr(self.spec, 'output_coders', None):
       for i, coder in enumerate(self.spec.output_coders):
-        self.receivers.append(ReceiverSet(coder, i))
+        self.receivers.append(ReceiverSet(counter_factory, coder, i))
 
   def start(self):
     """Start operation."""
@@ -114,11 +125,6 @@ class Operation(object):
     for receiver in self.receivers:
       receiver.start(self.step_name)
 
-  def itercounters(self):
-    for receiver in self.receivers:
-      for counter in receiver.itercounters():
-        yield counter
-
   def finish(self):
     """Finish operation."""
     pass
@@ -127,8 +133,8 @@ class Operation(object):
     """Process element in operation."""
     pass
 
-  def output(self, windowed_value, output_index=0):
-    self.receivers[output_index].output(windowed_value)
+  def output(self, windowed_value, coder=None, output_index=0):
+    self.receivers[output_index].output(windowed_value, coder)
 
   def add_receiver(self, operation, output_index=0):
     """Adds a receiver operation for the specified output."""
@@ -175,8 +181,8 @@ class Operation(object):
 class ReadOperation(Operation):
   """A generic read operation that reads from proper input source."""
 
-  def __init__(self, spec):
-    super(ReadOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(ReadOperation, self).__init__(spec, counter_factory)
     self._current_progress = None
     self._reader = None
 
@@ -227,8 +233,8 @@ class ReadOperation(Operation):
 class WriteOperation(Operation):
   """A generic write operation that writes to a proper output sink."""
 
-  def __init__(self, spec):
-    super(WriteOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(WriteOperation, self).__init__(spec, counter_factory)
     self.writer = None
     self.use_windowed_value = False
 
@@ -245,40 +251,44 @@ class WriteOperation(Operation):
     if self.debug_logging_enabled:
       logging.debug('Processing [%s] in %s', o, self)
     assert isinstance(o, WindowedValue)
-    self.receivers[0].update_counters(o)
+    self.receivers[0].update_counters_start(o)
     if self.use_windowed_value:
       self.writer.Write(o)
     else:
       self.writer.Write(o.value)
+    self.receivers[0].update_counters_finish()
 
 
 class InMemoryWriteOperation(Operation):
   """A write operation that will write to an in-memory sink."""
 
-  def __init__(self, spec):
-    super(InMemoryWriteOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(InMemoryWriteOperation, self).__init__(spec, counter_factory)
     self.spec = spec
 
   def process(self, o):
     if self.debug_logging_enabled:
       logging.debug('Processing [%s] in %s', o, self)
     assert isinstance(o, WindowedValue)
-    self.receivers[0].update_counters(o)
+    self.receivers[0].update_counters_start(o)
     self.spec.output_buffer.append(o.value)
+    self.receivers[0].update_counters_finish()
 
 
 class GroupedShuffleReadOperation(Operation):
   """A shuffle read operation that will read from a grouped shuffle source."""
 
-  def __init__(self, spec, shuffle_source=None):
-    super(GroupedShuffleReadOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory, shuffle_source=None):
+    super(GroupedShuffleReadOperation, self).__init__(spec, counter_factory)
     self.shuffle_source = shuffle_source
     self._reader = None
 
   def start(self):
     super(GroupedShuffleReadOperation, self).start()
+    write_coder = None
     if self.shuffle_source is None:
       coders = (self.spec.coder.key_coder(), self.spec.coder.value_coder())
+      write_coder = WindowedValueCoder(TupleCoder(coders))
       self.shuffle_source = shuffle.GroupedShuffleSource(
           self.spec.shuffle_reader_config, coder=coders,
           start_position=self.spec.start_shuffle_position,
@@ -287,7 +297,7 @@ class GroupedShuffleReadOperation(Operation):
       for key, key_values in reader:
         self._reader = reader
         windowed_value = GlobalWindows.WindowedValue((key, key_values))
-        self.output(windowed_value)
+        self.output(windowed_value, coder=write_coder)
 
   def get_progress(self):
     if self._reader is not None:
@@ -301,15 +311,17 @@ class GroupedShuffleReadOperation(Operation):
 class UngroupedShuffleReadOperation(Operation):
   """A shuffle read operation reading from an ungrouped shuffle source."""
 
-  def __init__(self, spec, shuffle_source=None):
-    super(UngroupedShuffleReadOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory, shuffle_source=None):
+    super(UngroupedShuffleReadOperation, self).__init__(spec, counter_factory)
     self.shuffle_source = shuffle_source
     self._reader = None
 
   def start(self):
     super(UngroupedShuffleReadOperation, self).start()
+    write_coder = None
     if self.shuffle_source is None:
       coders = (BytesCoder(), self.spec.coder)
+      write_coder = WindowedValueCoder(TupleCoder(coders))
       self.shuffle_source = shuffle.UngroupedShuffleSource(
           self.spec.shuffle_reader_config, coder=coders,
           start_position=self.spec.start_shuffle_position,
@@ -318,7 +330,7 @@ class UngroupedShuffleReadOperation(Operation):
       for value in reader:
         self._reader = reader
         windowed_value = GlobalWindows.WindowedValue(value)
-        self.output(windowed_value)
+        self.output(windowed_value, coder=write_coder)
 
   def get_progress(self):
     # 'UngroupedShuffleReader' does not support progress reporting.
@@ -332,8 +344,8 @@ class UngroupedShuffleReadOperation(Operation):
 class ShuffleWriteOperation(Operation):
   """A shuffle write operation that will write to a shuffle sink."""
 
-  def __init__(self, spec, shuffle_sink=None):
-    super(ShuffleWriteOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory, shuffle_sink=None):
+    super(ShuffleWriteOperation, self).__init__(spec, counter_factory)
     self.writer = None
     self.shuffle_sink = shuffle_sink
 
@@ -345,6 +357,7 @@ class ShuffleWriteOperation(Operation):
       coders = (BytesCoder(), coder)
     else:
       coders = (coder.key_coder(), coder.value_coder())
+    self._write_coder = WindowedValueCoder(TupleCoder(coders))
     if self.shuffle_sink is None:
       self.shuffle_sink = shuffle.ShuffleSink(
           self.spec.shuffle_writer_config, coder=coders)
@@ -359,7 +372,7 @@ class ShuffleWriteOperation(Operation):
     if self.debug_logging_enabled:
       logging.debug('Processing [%s] in %s', o, self)
     assert isinstance(o, WindowedValue)
-    self.receivers[0].update_counters(o)
+    self.receivers[0].update_counters_start(o, coder=self._write_coder)
     # We typically write into shuffle key/value pairs. This is the reason why
     # the else branch below expects the value attribute of the WindowedValue
     # argument to be a KV pair. However the service may write to shuffle in
@@ -377,14 +390,15 @@ class ShuffleWriteOperation(Operation):
     # TODO(silviuc): Use timestamps for the secondary key to get values in
     # times-sorted order.
     self.writer.Write(k, '', v)
+    self.receivers[0].update_counters_finish()
 
 
 class DoOperation(Operation):
   """A Do operation that will execute a custom DoFn for each input element."""
 
-  def __init__(self, spec):
-    super(DoOperation, self).__init__(spec)
-    self.state = common.DoFnState()
+  def __init__(self, spec, counter_factory):
+    super(DoOperation, self).__init__(spec, counter_factory)
+    self.state = common.DoFnState(counter_factory)
 
   def _read_side_inputs(self, tags_and_types):
     """Generator reading side inputs in the order prescribed by tags_and_types.
@@ -408,7 +422,11 @@ class DoOperation(Operation):
     # Note that for each tag there could be several read operations in the
     # specification. This can happen for instance if the source has been
     # sharded into several files.
-    for side_tag, side_type in tags_and_types:
+    for side_tag, view_class, view_options in tags_and_types:
+      # Note that currently, the implementation of Iterable and List views
+      # are identical. This may change in the future once we allow very large
+      # side input collections.
+      is_singleton = view_class == pvalue.SingletonPCollectionView
       # Using the side_tag in the lambda below will trigger a pylint warning.
       # However in this case it is fine because the lambda is used right away
       # while the variable has the value assigned by the current iteration of
@@ -418,28 +436,23 @@ class DoOperation(Operation):
       for si in itertools.ifilter(
           lambda o: o.tag == side_tag, self.spec.side_inputs):
         if isinstance(si, maptask.WorkerSideInputSource):
-          op = ReadOperation(si)
+          op = ReadOperation(si, self.counter_factory)
         else:
           raise NotImplementedError('Unknown side input type: %r' % si)
-        for v in op.side_read_all(singleton=side_type):
+        for v in op.side_read_all(singleton=is_singleton):
           results.append(v)
-          if side_type:
+          if is_singleton:
             break
-      if side_type:
-        yield results[0] if results else EmptySideInput()
+      if is_singleton:
+        has_default, default = view_options
+        if results:
+          yield results[0]
+        elif has_default:
+          yield default
+        else:
+          yield EmptySideInput()
       else:
         yield results
-
-  def itercounters(self):
-    """Return an iterator over all our counters.
-
-    Yields:
-      Counters associated with this operation.
-    """
-    for counter in super(DoOperation, self).itercounters():
-      yield counter
-    for custom_counter in self.state.itercounters():
-      yield custom_counter
 
   def start(self):
     super(DoOperation, self).start()
@@ -483,8 +496,8 @@ class DoOperation(Operation):
 class CombineOperation(Operation):
   """A Combine operation executing a CombineFn for each input element."""
 
-  def __init__(self, spec):
-    super(CombineOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(CombineOperation, self).__init__(spec, counter_factory)
     # Combiners do not accept deferred side-inputs (the ignored fourth argument)
     # and therefore the code to handle the extra args/kwargs is simpler than for
     # the DoFn's of ParDo.
@@ -504,11 +517,11 @@ class CombineOperation(Operation):
         o.with_value((key, self.phased_combine_fn.apply(values))))
 
 
-def create_pgbk_op(spec):
+def create_pgbk_op(spec, counter_factory):
   if spec.combine_fn:
-    return PGBKCVOperation(spec)
+    return PGBKCVOperation(spec, counter_factory)
   else:
-    return PGBKOperation(spec)
+    return PGBKOperation(spec, counter_factory)
 
 
 class PGBKOperation(Operation):
@@ -519,8 +532,8 @@ class PGBKOperation(Operation):
   values in this bundle, memory permitting.
   """
 
-  def __init__(self, spec):
-    super(PGBKOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(PGBKOperation, self).__init__(spec, counter_factory)
     assert not self.spec.combine_fn
     self.table = collections.defaultdict(list)
     self.size = 0
@@ -554,8 +567,8 @@ class PGBKOperation(Operation):
 
 class PGBKCVOperation(Operation):
 
-  def __init__(self, spec):
-    super(PGBKCVOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(PGBKCVOperation, self).__init__(spec, counter_factory)
     # Combiners do not accept deferred side-inputs (the ignored fourth
     # argument) and therefore the code to handle the extra args/kwargs is
     # simpler than for the DoFn's of ParDo.
@@ -623,8 +636,9 @@ class ReifyTimestampAndWindowsOperation(Operation):
   timestamp and windows.
   """
 
-  def __init__(self, spec):
-    super(ReifyTimestampAndWindowsOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(ReifyTimestampAndWindowsOperation, self).__init__(
+        spec, counter_factory)
 
   def process(self, o):
     if self.debug_logging_enabled:
@@ -640,8 +654,9 @@ class BatchGroupAlsoByWindowsOperation(Operation):
   Implements GroupAlsoByWindow for batch pipelines.
   """
 
-  def __init__(self, spec):
-    super(BatchGroupAlsoByWindowsOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(BatchGroupAlsoByWindowsOperation, self).__init__(
+        spec, counter_factory)
     self.windowing = pickler.loads(self.spec.window_fn)
     if self.spec.combine_fn:
       # Combiners do not accept deferred side-inputs (the ignored fourth
@@ -681,8 +696,9 @@ class StreamingGroupAlsoByWindowsOperation(Operation):
   Implements GroupAlsoByWindow for streaming pipelines.
   """
 
-  def __init__(self, spec):
-    super(StreamingGroupAlsoByWindowsOperation, self).__init__(spec)
+  def __init__(self, spec, counter_factory):
+    super(StreamingGroupAlsoByWindowsOperation, self).__init__(
+        spec, counter_factory)
     self.windowing = pickler.loads(self.spec.window_fn)
 
   def process(self, o):
@@ -750,23 +766,23 @@ class MapTaskExecutor(object):
     # elements is important because the inputs use list indexes as references.
     for spec in map_task.operations:
       if isinstance(spec, maptask.WorkerRead):
-        op = ReadOperation(spec)
+        op = ReadOperation(spec, map_task.counter_factory)
         if self._read_operation is not None:
           raise RuntimeError(
               MapTaskExecutor.multiple_read_instruction_error_msg)
         else:
           self._read_operation = op
       elif isinstance(spec, maptask.WorkerWrite):
-        op = WriteOperation(spec)
+        op = WriteOperation(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerCombineFn):
-        op = CombineOperation(spec)
+        op = CombineOperation(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerPartialGroupByKey):
-        op = create_pgbk_op(spec)
+        op = create_pgbk_op(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerDoFn):
-        op = DoOperation(spec)
+        op = DoOperation(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerGroupingShuffleRead):
         op = GroupedShuffleReadOperation(
-            spec, shuffle_source=test_shuffle_source)
+            spec, map_task.counter_factory, shuffle_source=test_shuffle_source)
         if self._read_operation is not None:
           raise RuntimeError(
               MapTaskExecutor.multiple_read_instruction_error_msg)
@@ -774,27 +790,29 @@ class MapTaskExecutor(object):
           self._read_operation = op
       elif isinstance(spec, maptask.WorkerUngroupedShuffleRead):
         op = UngroupedShuffleReadOperation(
-            spec, shuffle_source=test_shuffle_source)
+            spec, map_task.counter_factory, shuffle_source=test_shuffle_source)
         if self._read_operation is not None:
           raise RuntimeError(
               MapTaskExecutor.multiple_read_instruction_error_msg)
         else:
           self._read_operation = op
       elif isinstance(spec, maptask.WorkerInMemoryWrite):
-        op = InMemoryWriteOperation(spec)
+        op = InMemoryWriteOperation(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerShuffleWrite):
-        op = ShuffleWriteOperation(spec, shuffle_sink=test_shuffle_sink)
+        op = ShuffleWriteOperation(
+            spec, map_task.counter_factory, shuffle_sink=test_shuffle_sink)
       elif isinstance(spec, maptask.WorkerFlatten):
-        op = FlattenOperation(spec)
+        op = FlattenOperation(spec, map_task.counter_factory)
       elif isinstance(spec, maptask.WorkerMergeWindows):
         if isinstance(spec.context, maptask.BatchExecutionContext):
-          op = BatchGroupAlsoByWindowsOperation(spec)
+          op = BatchGroupAlsoByWindowsOperation(spec, map_task.counter_factory)
         elif isinstance(spec.context, maptask.StreamingExecutionContext):
-          op = StreamingGroupAlsoByWindowsOperation(spec)
+          op = StreamingGroupAlsoByWindowsOperation(spec,
+                                                    map_task.counter_factory)
         else:
           raise RuntimeError('Unknown execution context: %s' % spec.context)
       elif isinstance(spec, maptask.WorkerReifyTimestampAndWindows):
-        op = ReifyTimestampAndWindowsOperation(spec)
+        op = ReifyTimestampAndWindowsOperation(spec, map_task.counter_factory)
       else:
         raise TypeError('Expected an instance of maptask.Worker* class '
                         'instead of %s' % (spec,))
@@ -817,9 +835,6 @@ class MapTaskExecutor(object):
     if map_task.step_names is not None:
       for ix, op in enumerate(self._ops):
         op.step_name = map_task.step_names[ix]
-
-    # Attach the ops back to the map_task, so we can report their counters.
-    map_task.executed_operations = self._ops
 
     ix = len(self._ops)
     for op in reversed(self._ops):

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#      http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataflow SDK for Python version information."""
 
-__version__ = '0.2.3'
+"""Observable base class for iterables."""
+
+
+class ObservableMixin(object):
+  """An observable iterable.
+
+  Subclasses need to call self.notify_observers with any object yielded.
+  """
+
+  def __init__(self):
+    self.observers = []
+
+  def register_observer(self, callback):
+    self.observers.append(callback)
+
+  def notify_observers(self, value, **kwargs):
+    for o in self.observers:
+      o(value, **kwargs)

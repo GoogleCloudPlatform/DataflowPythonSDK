@@ -16,6 +16,7 @@ cimport cython
 
 cdef class Operation(object):
   cdef public spec
+  cdef public counter_factory
   cdef public list receivers
   cdef public list counters
   cdef readonly bint debug_logging_enabled
@@ -27,7 +28,7 @@ cdef class Operation(object):
   cpdef finish(self)
 
   @cython.locals(receiver=Operation)
-  cpdef output(self, windowed_value, int output_index=*)
+  cpdef output(self, windowed_value, object coder=*, int output_index=*)
 
 cdef class ReadOperation(Operation):
   cdef object _current_progress
@@ -44,6 +45,7 @@ cdef class CombineOperation(Operation):
 cdef class ShuffleWriteOperation(Operation):
   cdef object shuffle_sink
   cdef object writer
+  cdef object _write_coder
   cdef bint is_ungrouped
 
 cdef class GroupedShuffleReadOperation(Operation):

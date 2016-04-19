@@ -18,7 +18,7 @@ import gc
 import logging
 import unittest
 
-from google.cloud.dataflow.io.iobase import Source
+from google.cloud.dataflow.io.iobase import NativeSource
 from google.cloud.dataflow.pipeline import Pipeline
 from google.cloud.dataflow.pipeline import PipelineOptions
 from google.cloud.dataflow.pipeline import PipelineVisitor
@@ -35,7 +35,7 @@ from google.cloud.dataflow.transforms import Read
 from google.cloud.dataflow.transforms.util import assert_that, equal_to
 
 
-class FakeSource(Source):
+class FakeSource(NativeSource):
   """Fake source returning a fixed list of values."""
 
   class _Reader(object):
@@ -240,6 +240,21 @@ class PipelineTest(unittest.TestCase):
 
     assert_that(result, equal_to([('x', 3000000)]))
     pipeline.run()
+    self.assertEqual(
+        pipeline.runner.debug_counters['element_counts'],
+        {
+            'oom:flatten': 3000000,
+            ('oom:combine/GroupByKey/reify_windows', None): 3000000,
+            ('oom:dupes/oom:dupes', 'side'): 1000000,
+            ('oom:dupes/oom:dupes', None): 1000000,
+            'oom:create': 1000000,
+            ('oom:addone', None): 1000000,
+            'oom:combine/GroupByKey/group_by_key': 1,
+            ('oom:check', None): 1,
+            'assert_that/singleton': 1,
+            ('assert_that/Map(match)', None): 1,
+            ('oom:combine/GroupByKey/group_by_window', None): 1,
+            ('oom:combine/Combine/ParDo(CombineValuesDoFn)', None): 1})
 
 
 class Bacon(PipelineOptions):
@@ -311,5 +326,5 @@ class PipelineOptionsTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.INFO)
+  logging.getLogger().setLevel(logging.DEBUG)
   unittest.main()
