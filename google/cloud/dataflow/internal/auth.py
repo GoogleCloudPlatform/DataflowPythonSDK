@@ -145,8 +145,7 @@ def get_service_credentials():
         return ServiceAccountCredentials.from_p12_keyfile(
             google_cloud_options.service_account_name,
             google_cloud_options.service_account_key_file,
-            client_scopes,
-            user_agent=user_agent)
+            scopes=client_scopes)
       except ImportError:
         with file(google_cloud_options.service_account_key_file) as f:
           service_account_key = f.read()
