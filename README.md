@@ -1,3 +1,9 @@
+# We moved to Apache Beam!
+Google Cloud Dataflow for Python is now Apache Beam Python SDK and the code development moved to the [Apache Beam repo](https://github.com/apache/incubator-beam/tree/python-sdk/sdks/python).
+
+If you want to contribute to the project (please do!) use this [Apache Beam contributor's guide](http://beam.incubator.apache.org/contribution-guide/)
+
+
 # Cloud Dataflow SDK for Python
 
 [Google Cloud Dataflow](https://cloud.google.com/dataflow/)
